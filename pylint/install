@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+
+REAL_FILE="$SCRIPT_DIR/.config/pylintrc"
+UPDATE_FILE="$SCRIPT_DIR/.config/pylintrc.UPDATE"
+RECENTLY_UPDATED="$((12 * 60 * 60))" # 12 hours in seconds
+
+CHECK_MODE=false
+if [[ ${1:-} == "--check" ]] || [[ ${1:-} == "-c" ]]; then
+    CHECK_MODE=true
+fi
+
+fetch_pylint() {
+    if [[ -e "$UPDATE_FILE" ]]; then
+        MODIFIED_TIME="$(stat -c %Y "$UPDATE_FILE")"
+        CURRENT_TIME="$(date +%s)"
+        ELAPSED_SECONDS="$((CURRENT_TIME - MODIFIED_TIME))"
+        if [[ $ELAPSED_SECONDS -lt $RECENTLY_UPDATED ]]; then
+            return
+        fi
+    fi
+
+    curl --silent https://google.github.io/styleguide/pylintrc >"$UPDATE_FILE"
+}
+
+patch_pylint() {
+    # guide config conflicts with doc (2 spaces google internal, 4 spaces google external)
+    sed -i "s/^indent-string=.*$/indent-string='    '/" "$UPDATE_FILE"
+
+    # "i have a widescreen"
+    sed -i "s/^max-line-length=.*$/max-line-length=120/" "$UPDATE_FILE"
+
+    # disabling W1405 as auto-formatters handle & f-strings use inconsistent within triggering false positive
+    sed -i "s/^check-quote-consistency=.*$/check-quote-consistency=no/" "$UPDATE_FILE"
+}
+
+mkdir -p "$SCRIPT_DIR/.config"
+fetch_pylint
+patch_pylint
+
+EXTRA_STOW_ARGS=()
+if [[ $CHECK_MODE == true ]]; then
+    if [[ ! -e $REAL_FILE ]]; then
+        echo "Create: $REAL_FILE"
+    else
+        diff "$UPDATE_FILE" "$REAL_FILE" || true
+    fi
+    EXTRA_STOW_ARGS+=(--no)
+elif ! cmp -s -- "$UPDATE_FILE" "$REAL_FILE"; then
+    cp --verbose "$UPDATE_FILE" "$REAL_FILE"
+fi
+
+stow "${EXTRA_STOW_ARGS[@]}" --verbose --dir="$(realpath "$SCRIPT_DIR/..")" --ignore=install --ignore='\.UPDATE' pylint

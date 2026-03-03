@@ -1,0 +1,40 @@
+target-version = "py312"
+line-length = 120
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # Pyflakes
+  "I",   # isort (Google requires sorted imports)
+  "UP",  # pyupgrade (Essential for Python 3.12 syntax)
+  "PL",  # Pylint
+  "D",   # pydocstyle (Google convention)
+  "N",   # pep8-naming
+  "B",   # flake8-bugbear
+  "Q",   # flake8-quotes
+  "S",   # flake8-bandit (Security)
+  "A",   # flake8-builtins
+  "SLF", # flake8-self (Private member access)
+  "ICN", # flake8-import-conventions
+  "PT",  # flake8-pytest-style
+  "RUF", # Ruff-specific rules
+  "SIM", # flake8-simplify
+]
+ignore = [
+  "E501", # Formatter handles line length
+  "D203", # Conflict with D211 (one-blank-line-before-class)
+  "D213", # Conflict with D212 (multi-line-summary-first-line)
+  "D100", # Missing docstring in public module
+  "D101", # Missing docstring in public class
+  "D103", # Missing docstring in public function
+]
+
+fixable = ["ALL"]
+unfixable = [
+  "F401", # Prevent deletion of temporary unused imports
+  "B",    # Prevent bugbear from changing logic automatically
+]
+
+[lint.pydocstyle]
+convention = "google"

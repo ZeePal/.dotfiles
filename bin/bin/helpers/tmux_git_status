@@ -1,0 +1,4 @@
+#!/bin/bash
+path="${1:?}"
+repo="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)"
+[ -n "$repo" ] && echo "${repo##*/}" || echo "${path/#"$HOME"/\~}"

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+
+REAL_FILE="$SCRIPT_DIR/meld.ini"
+CURRENT_FILE="$SCRIPT_DIR/meld.ini.CURRENT"
+DCONF_PATH=/org/gnome/meld/
+
+CHECK_MODE=false
+if [[ ${1:-} == "--check" ]] || [[ ${1:-} == "-c" ]]; then
+    CHECK_MODE=true
+fi
+
+patch_meld() {
+    # don't want to manage the [window-state] height/width
+    sed -i "/^height=.*$/d" "$CURRENT_FILE"
+    sed -i "/^width=.*$/d" "$CURRENT_FILE"
+}
+
+dconf dump "$DCONF_PATH" >"$CURRENT_FILE"
+patch_meld
+
+if ! cmp -s -- "$REAL_FILE" "$CURRENT_FILE"; then
+    if [[ $CHECK_MODE == true ]]; then
+        echo "dconf load $DCONF_PATH <$REAL_FILE"
+    else
+        dconf load "$DCONF_PATH" <"$REAL_FILE"
+    fi
+fi

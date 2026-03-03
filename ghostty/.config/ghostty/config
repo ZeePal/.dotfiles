@@ -1,0 +1,12 @@
+theme = Abernathy
+command = tmux
+
+maximize = true
+gtk-titlebar-hide-when-maximized = true
+# maximize=true isnt working so got some workarounds
+window-height = 99999
+window-width = 99999
+gtk-titlebar = false
+window-decoration = false
+# end maximize=true workaround
+

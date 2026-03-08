@@ -88,5 +88,11 @@ vim.filetype.add({
 				end
 			end
 		end,
+		-- Matches .DISABLED, .disabled, .DiSaBlEd, etc.
+		[".*%.[dD][iI][sS][aA][bB][lL][eE][dD]"] = function(path, bufnr)
+			-- Strip the suffix (also case-insensitively)
+			local new_path = path:gsub("%.[dD][iI][sS][aA][bB][lL][eE][dD]$", "")
+			return vim.filetype.match({ filename = new_path, buf = bufnr })
+		end,
 	},
 })

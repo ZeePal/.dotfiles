@@ -3,6 +3,9 @@
     "share": "disabled",
     "model": "github-copilot/gpt-5-mini",
     "small_model": "github-copilot/gpt-5-mini",
+    "plugin": [
+        "@slkiser/opencode-quota"
+    ],
     "formatter": {
         "black": {
             "command": [
@@ -21,6 +24,13 @@
         "context7": {
             "type": "remote",
             "url": "https://mcp.context7.com/mcp"
+        }
+    },
+    "experimental": {
+        "quotaToast": {
+            "enabledProviders": [
+                "openai"
+            ]
         }
     }
 }

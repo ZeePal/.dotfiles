@@ -4,61 +4,66 @@ SCRIPT_DIR="$(cd "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 
 CHECK_MODE=false
 NO_FOLDING=(
-	bin
-	git
-	opencode
+    bin
+    git
+    opencode
 )
 IGNORE_PACKAGE=(
-	docs
+    docs
 )
 
+if [ "$HOME/.dotfiles" != "$SCRIPT_DIR" ]; then
+    echo "ERROR: executing from wrong folder: $SCRIPT_DIR" >&2
+    exit 1
+fi
+
 stow_package() {
-	local package="${1%/}"
-	# shellcheck disable=SC2076  # want the spaces checked explicity
-	if [[ " ${IGNORE_PACKAGE[*]} " =~ " $package " ]]; then
-		return
-	fi
+    local package="${1%/}"
+    # shellcheck disable=SC2076  # want the spaces checked explicity
+    if [[ " ${IGNORE_PACKAGE[*]} " =~ " $package " ]]; then
+        return
+    fi
 
-	local custom_install_script="$SCRIPT_DIR/$package/install"
-	if [ -e "$custom_install_script" ]; then
-		if [[ $CHECK_MODE == true ]]; then
-			"$custom_install_script" --check
-		else
-			"$custom_install_script"
-		fi
-		return
-	fi
+    local custom_install_script="$SCRIPT_DIR/$package/install"
+    if [ -e "$custom_install_script" ]; then
+        if [[ $CHECK_MODE == true ]]; then
+            "$custom_install_script" --check
+        else
+            "$custom_install_script"
+        fi
+        return
+    fi
 
-	EXTRA_ARGS=()
-	if [[ $CHECK_MODE == true ]]; then
-		EXTRA_ARGS+=(--no)
-	fi
-	# shellcheck disable=SC2076  # want the spaces checked explicity
-	if [[ " ${NO_FOLDING[*]} " =~ " $package " ]]; then
-		EXTRA_ARGS+=(--no-folding)
-	fi
+    EXTRA_ARGS=()
+    if [[ $CHECK_MODE == true ]]; then
+        EXTRA_ARGS+=(--no)
+    fi
+    # shellcheck disable=SC2076  # want the spaces checked explicity
+    if [[ " ${NO_FOLDING[*]} " =~ " $package " ]]; then
+        EXTRA_ARGS+=(--no-folding)
+    fi
 
-	stow --verbose --dir="$SCRIPT_DIR" "${EXTRA_ARGS[@]}" "$package" || [[ $CHECK_MODE == true ]]
+    stow --verbose --dir="$SCRIPT_DIR" "${EXTRA_ARGS[@]}" "$package" || [[ $CHECK_MODE == true ]]
 }
 
 filter() {
-	local package="${1%/}"
-	sed '/^WARNING: in simulation mode so not modifying filesystem\.$/d;/^All operations aborted\.$/d;s/^/'"$package"' ->  /'
+    local package="${1%/}"
+    sed '/^WARNING: in simulation mode so not modifying filesystem\.$/d;/^All operations aborted\.$/d;s/^/'"$package"' ->  /'
 }
 
 if [[ ${1:-} == "--check" ]] || [[ ${1:-} == "-c" ]]; then
-	CHECK_MODE=true
-	shift 1
+    CHECK_MODE=true
+    shift 1
 fi
 
 if [ "$#" -gt 0 ]; then
-	for package in "$@"; do
-		stow_package "$package" 2>&1 | filter "$package"
-	done
+    for package in "$@"; do
+        stow_package "$package" 2>&1 | filter "$package"
+    done
 else
-	for package in "$SCRIPT_DIR/"*/; do
-		package="${package%/}"
-		package="${package##*/}"
-		stow_package "$package" 2>&1 | filter "$package"
-	done
+    for package in "$SCRIPT_DIR/"*/; do
+        package="${package%/}"
+        package="${package##*/}"
+        stow_package "$package" 2>&1 | filter "$package"
+    done
 fi

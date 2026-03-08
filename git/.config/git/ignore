@@ -89,6 +89,8 @@ go.work
 [._]sw[a-p]
 Session.vim
 Sessionx.vim
+## 99
+.tmp
 
 
 

@@ -16,6 +16,8 @@ addToPathFront "$HOME/.cargo/bin"
 addToPathFront "$HOME/.local/bin"
 addToPathFront "$HOME/bin"
 
+export MANPATH="${MANPATH-$(manpath)}:$HOME/.npm-global/share/man"
+
 # check the window size after each command and, if necessary,
 # update the values of LINES and COLUMNS.
 shopt -s checkwinsize

@@ -82,7 +82,13 @@ _simpler_cd_completer() {
 
 function _gcd { CDPATH="$HOME/git/" _simpler_cd_completer "$@"; }
 complete -o nospace -F _gcd gcd
-function gcd { cd "$HOME/git/$1"; }
+function gcd {
+    local g="$HOME/git"
+    if [ ! -e "$g/$1" ]; then
+        (cd "$g" && gclone "$1")
+    fi
+    cd "$g/$1"
+}
 
 function _tcd { CDPATH=/tmp/phtest/ _simpler_cd_completer "$@"; }
 complete -o nospace -F _tcd tcd
@@ -160,6 +166,8 @@ s() { # search
 }
 
 alias python=python3
+
+alias plot='gnuplot -e "set terminal dumb 120,50; set output \"/dev/stdout\"; plot \"/dev/stdin\" notitle"'
 
 # Add an "alert" alias for long running commands.  Use like so:
 #   sleep 10; alert

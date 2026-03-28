@@ -1,0 +1,144 @@
+#!/bin/sh
+
+pane_pid=${1:?}
+pane_current_command=${2:?}
+
+is_wrapper() {
+    case "$1" in
+    sudo | bwrap)
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+is_interpreter() {
+    case "$1" in
+    bash | bun | node | perl | php | python | python[0-9] | python[0-9].[0-9] | ruby | sh)
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+is_shell() {
+    case "$1" in
+    bash)
+        return 0
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+process_comm() {
+    IFS= read -r process_name <"/proc/$1/comm" 2>/dev/null || return 1
+    printf '%s\n' "$process_name"
+}
+
+first_child_pid() {
+    ps -o pid= --ppid "$1" 2>/dev/null |
+        {
+            IFS=' ' read -r child_pid _
+            printf '%s' "$child_pid"
+        }
+}
+
+advance_to_first_non_wrapper_child() {
+    current_pid=$1
+
+    while :; do
+        child_pid=$(first_child_pid "$current_pid")
+        if [ -z "$child_pid" ]; then
+            return 1
+        fi
+
+        child_cmd=$(process_comm "$child_pid")
+        if [ -z "$child_cmd" ]; then
+            return 1
+        fi
+
+        resolved_pid=$child_pid
+        resolved_cmd=$child_cmd
+        if ! is_wrapper "$resolved_cmd"; then
+            return 0
+        fi
+
+        current_pid=$resolved_pid
+    done
+}
+
+display_name_for_pid() {
+    process_name=$1
+    target_pid=$2
+
+    if ! is_interpreter "$process_name"; then
+        printf '%s\n' "$process_name"
+        return
+    fi
+
+    script_arg=$(first_non_option_arg "$target_pid")
+
+    if [ -z "$script_arg" ]; then
+        printf '%s\n' "$process_name"
+        return
+    fi
+
+    printf '%s\n' "${script_arg##*/}"
+}
+
+first_non_option_arg() {
+    awk '
+        BEGIN { RS = "\0" }
+        NR > 1 {
+            if ($0 == "--") {
+                if (getline > 0) {
+                    print
+                }
+                exit
+            }
+
+            if ($0 !~ /^-/) {
+                print
+                exit
+            }
+        }
+    ' "/proc/$1/cmdline" 2>/dev/null
+}
+
+if [ -n "$pane_current_command" ] && ! is_wrapper "$pane_current_command" && ! is_interpreter "$pane_current_command"; then
+    printf '%s\n' "$pane_current_command"
+    exit 0
+fi
+
+resolved_pid=$pane_pid
+resolved_cmd=$(process_comm "$resolved_pid")
+
+if [ -z "$resolved_cmd" ]; then
+    printf '%s\n' "$pane_current_command"
+    exit 0
+fi
+
+if is_shell "$resolved_cmd"; then
+    advance_to_first_non_wrapper_child "$resolved_pid" || {
+        printf '%s\n' "$pane_current_command"
+        exit 0
+    }
+elif is_wrapper "$resolved_cmd"; then
+    advance_to_first_non_wrapper_child "$resolved_pid" || {
+        printf '%s\n' "$pane_current_command"
+        exit 0
+    }
+fi
+
+if [ -z "$resolved_cmd" ] || [ -z "$resolved_pid" ]; then
+    printf '%s\n' "$pane_current_command"
+    exit 0
+fi
+
+display_name_for_pid "$resolved_cmd" "$resolved_pid"

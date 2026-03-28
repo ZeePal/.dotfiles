@@ -1,4 +1,43 @@
-#!/bin/bash
-path="${1:?}"
-repo="$(git -C "$path" rev-parse --show-toplevel 2>/dev/null)"
-[ -n "$repo" ] && echo "${repo##*/}" || echo "${path/#"$HOME"/\~}"
+#!/bin/sh
+
+path=${1:?}
+
+display_path() {
+    case $path in
+    "$HOME")
+        printf '~\n'
+        ;;
+    "$HOME"/*)
+        printf '%s/%s\n' '~' "${path#"$HOME"/}"
+        ;;
+    *)
+        printf '%s\n' "$path"
+        ;;
+    esac
+}
+
+repo_root_name() {
+    search_path=$path
+
+    while [ "$search_path" != "/" ]; do
+        if [ -e "$search_path/.git" ]; then
+            printf '%s\n' "${search_path##*/}"
+            return 0
+        fi
+
+        search_path=${search_path%/*}
+
+        if [ -z "$search_path" ]; then
+            search_path=/
+        fi
+    done
+
+    if [ -e "/.git" ]; then
+        printf '/\n'
+        return 0
+    fi
+
+    return 1
+}
+
+repo_root_name || display_path

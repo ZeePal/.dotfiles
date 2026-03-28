@@ -89,6 +89,7 @@ exec bwrap \
     --ro-bind /etc/passwd /etc/passwd \
     --ro-bind /etc/group /etc/group \
     --ro-bind /etc/localtime /etc/localtime \
+    --ro-bind /etc/alternatives /etc/alternatives \
     \
     `# SSL certificates for API access` \
     --ro-bind-try /etc/ssl /etc/ssl \

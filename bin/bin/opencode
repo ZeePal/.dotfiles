@@ -1,2 +1,2 @@
 #!/bin/sh
-exec agentwrap opencode "$@"
+exec agentwrap ~/.npm-global/bin/opencode "$@"

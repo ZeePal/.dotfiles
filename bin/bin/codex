@@ -1,0 +1,2 @@
+#!/bin/sh
+exec agentwrap ~/.npm-global/bin/codex "$@"

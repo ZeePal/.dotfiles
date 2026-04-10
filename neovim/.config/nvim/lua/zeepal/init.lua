@@ -25,6 +25,12 @@ autocmd({ "BufWritePre" }, {
 	command = [[%s/\s\+$//e]],
 })
 
+autocmd("BufWritePre", {
+	group = ZeePalGroup,
+	pattern = os.getenv("HOME") .. "/.secrets/**",
+	command = "setlocal noundofile",
+})
+
 autocmd("LspAttach", {
 	group = ZeePalGroup,
 	callback = function(e)

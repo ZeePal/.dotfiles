@@ -3,6 +3,14 @@
     "share": "disabled",
     "model": "github-copilot/gpt-5.4",
     "small_model": "github-copilot/gpt-5-mini",
+    "lsp": false,
+    "tools": {
+        "lsp": false,
+        "webfetch": false,
+        "todowrite": false,
+        "question": false,
+        "quota_status": false
+    },
     "plugin": [
         "@slkiser/opencode-quota"
     ],

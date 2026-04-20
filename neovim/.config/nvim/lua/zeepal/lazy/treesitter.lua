@@ -1,88 +1,106 @@
 return {
 	{
 		"nvim-treesitter/nvim-treesitter",
-		branch = "master",
+		branch = "main",
+		lazy = false,
+		build = ":TSUpdate",
 		config = function()
-			require("nvim-treesitter.configs").setup({
-				-- A list of parser names, or "all"
-				ensure_installed = {
-					"lua",
-					"vim",
-					"vimdoc",
-					"bash",
-					"gitignore",
-					"json",
-					"yaml",
-					"toml",
-					"dockerfile",
-					"terraform",
-					"hcl",
-					"python",
-					"go",
-					"rust",
-					"markdown",
-					"markdown_inline",
-					"html",
-					"typst",
-					"awk",
-					"comment",
-					"c",
-					"cpp",
-					"javascript",
-					"typescript",
-					"make",
-					"powershell",
-					"regex",
-					"requirements",
-					"sql",
-					"csv",
-				},
+			local parsers = {
+				"lua",
+				"vim",
+				"vimdoc",
+				"bash",
+				"gitignore",
+				"json",
+				"yaml",
+				"toml",
+				"dockerfile",
+				"terraform",
+				"hcl",
+				"python",
+				"go",
+				"rust",
+				"markdown",
+				"markdown_inline",
+				"html",
+				"typst",
+				"awk",
+				"comment",
+				"c",
+				"cpp",
+				"javascript",
+				"typescript",
+				"make",
+				"powershell",
+				"regex",
+				"requirements",
+				"sql",
+				"csv",
+			}
 
-				-- Install parsers synchronously (only applied to `ensure_installed`)
-				sync_install = false,
+			local ts = require("nvim-treesitter")
+			ts.setup({})
+			ts.install(parsers)
 
-				-- Automatically install missing parsers when entering buffer
-				-- Recommendation: set to false if you don"t have `tree-sitter` CLI installed locally
-				auto_install = true,
+			local max_filesize = 100 * 1024
+			local large_file_warned = {}
 
-				indent = {
-					enable = true,
-				},
+			local function should_disable(buf)
+				if vim.bo[buf].filetype == "html" then
+					return true
+				end
 
-				highlight = {
-					-- `false` will disable the whole extension
-					enable = true,
-					disable = function(lang, buf)
-						if lang == "html" then
-							print("disabled")
-							return true
-						end
+				local name = vim.api.nvim_buf_get_name(buf)
+				if name == "" then
+					return false
+				end
 
-						local max_filesize = 100 * 1024 -- 100 KB
-						local ok, stats = pcall(vim.loop.fs_stat, vim.api.nvim_buf_get_name(buf))
-						if ok and stats and stats.size > max_filesize then
-							vim.notify(
-								"File larger than 100KB treesitter disabled for performance",
-								vim.log.levels.WARN,
-								{ title = "Treesitter" }
-							)
-							return true
-						end
-					end,
+				local ok, stats = pcall(vim.uv.fs_stat, name)
+				if ok and stats and stats.size > max_filesize then
+					if not large_file_warned[buf] then
+						large_file_warned[buf] = true
+						vim.notify(
+							"File larger than 100KB treesitter disabled for performance",
+							vim.log.levels.WARN,
+							{ title = "Treesitter" }
+						)
+					end
+					return true
+				end
 
-					-- Setting this to true will run `:h syntax` and tree-sitter at the same time.
-					-- Set this to `true` if you depend on "syntax" being enabled (like for indentation).
-					-- Using this option may slow down your editor, and you may see some duplicate highlights.
-					-- Instead of true it can also be a list of languages
-					additional_vim_regex_highlighting = { "markdown" },
-				},
+				return false
+			end
+
+			vim.api.nvim_create_autocmd("FileType", {
+				group = vim.api.nvim_create_augroup("zeepal_treesitter_start", { clear = true }),
+				callback = function(args)
+					if should_disable(args.buf) then
+						return
+					end
+
+					pcall(vim.treesitter.start, args.buf)
+					if vim.bo[args.buf].filetype == "markdown" then
+						vim.bo[args.buf].syntax = "on"
+					end
+				end,
+			})
+
+			vim.api.nvim_create_autocmd("FileType", {
+				group = vim.api.nvim_create_augroup("zeepal_treesitter_indent", { clear = true }),
+				callback = function(args)
+					if should_disable(args.buf) then
+						return
+					end
+
+					vim.bo[args.buf].indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+				end,
 			})
 		end,
 	},
 
 	{
 		"nvim-treesitter/nvim-treesitter-context",
-		after = "nvim-treesitter",
+		dependencies = { "nvim-treesitter/nvim-treesitter" },
 		config = function()
 			require("treesitter-context").setup({
 				enable = true, -- Enable this plugin (Can be enabled/disabled later via commands)

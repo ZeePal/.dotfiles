@@ -10,3 +10,6 @@ gtk-titlebar = false
 window-decoration = false
 # end maximize=true workaround
 
+# freeing up ctrl+shift+p for pi
+keybind = ctrl+shift+p=unbind
+keybind = ctrl+shift+k=inspector:toggle

@@ -6,10 +6,23 @@
     "lsp": false,
     "tools": {
         "lsp": false,
+        "glob": false,
+        "grep": false,
         "webfetch": false,
         "todowrite": false,
         "question": false,
         "quota_status": false
+    },
+    "agent": {
+        "plan": {
+            "permission": {
+                "bash": "deny",
+                "edit": "deny",
+                "glob": "allow",
+                "grep": "allow",
+                "webfetch": "allow"
+            }
+        }
     },
     "plugin": [
         "@slkiser/opencode-quota"

@@ -175,6 +175,6 @@ alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo
 
 alias oc=opencode
 alias ocf='oc --model github-copilot/gpt-5-mini'
-alias ocfq='ocf run'
+alias ocfq='ocf --agent plan run'
 alias pif='pi --model github-copilot/gpt-5-mini:high'
 alias pifq='pif --tools read,grep,find,ls -p'

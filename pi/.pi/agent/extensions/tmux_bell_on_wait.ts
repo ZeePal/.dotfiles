@@ -10,4 +10,8 @@ export default function tmuxBellOnWait(pi: ExtensionAPI) {
     pi.on("agent_end", () => {
         bell();
     });
+
+    pi.events.on("pi-sandbox:approval-required", () => {
+        bell();
+    });
 }

@@ -1,4 +1,13 @@
 {
     "fs": "write",
-    "net": "unrestricted"
+    "net": "unrestricted",
+    "network_proxy": {
+        "allow": [
+            "registry.terraform.io",
+            "releases.hashicorp.com",
+            "pypi.org",
+            "files.pythonhosted.org"
+        ],
+        "deny": []
+    }
 }

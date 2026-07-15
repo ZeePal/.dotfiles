@@ -1,5 +1,5 @@
 {
-    "lastChangelogVersion": "0.79.6",
+    "lastChangelogVersion": "0.80.7",
     "defaultProvider": "github-copilot",
     "defaultModel": "gpt-5.5",
     "defaultThinkingLevel": "low",
@@ -13,5 +13,23 @@
         "github-copilot/claude-sonnet-4.6",
         "github-copilot/gemini-3.1-pro-preview",
         "github-copilot/claude-opus-4.6"
-    ]
+    ],
+    "ZeePal": {
+        "sandbox": {
+            "fs": "write",
+            "net": "unrestricted",
+            "network_proxy": {
+                "allow": [
+                    "registry.terraform.io",
+                    "releases.hashicorp.com",
+                    "checkpoint-api.hashicorp.com",
+                    "github.com",
+                    "pypi.org",
+                    "files.pythonhosted.org",
+                    "registry.npmjs.org"
+                ],
+                "deny": []
+            }
+        }
+    }
 }

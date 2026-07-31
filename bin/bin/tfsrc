@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: tfsrc [-d|--data] [--provider PROVIDER] [--repo URL] [--stable|-b|--beta|-n|--nightly|-m|--magic] [--print] TYPE
+
+Clone a Terraform provider repo under ~/git/terraform/ when missing and open the source file in your editor.
+
+Examples:
+  tfsrc google_storage_bucket
+  tfsrc --stable google_storage_bucket
+  tfsrc -b google_storage_bucket
+  tfsrc -n google_storage_bucket
+  tfsrc -m google_storage_bucket
+  tfsrc -d google_storage_bucket
+  tfsrc --provider aws aws_instance
+
+Notes:
+  - TYPE is normally the Terraform resource/data source type, e.g. google_storage_bucket.
+  - Default repo mapping is https://github.com/hashicorp/terraform-provider-<provider>.git.
+  - Google channels:
+      stable  -> hashicorp/terraform-provider-google
+      beta    -> hashicorp/terraform-provider-google-beta
+      nightly -> hashicorp/terraform-provider-google-nightly
+      magic   -> GoogleCloudPlatform/magic-modules
+  - Editor selection: $VISUAL, then $EDITOR, then editor(1), then sensible-editor, then vi.
+EOF
+}
+
+fatal() {
+    echo "tfsrc: $*" >&2
+    exit 1
+}
+
+require_cmd() {
+    command -v "$1" >/dev/null 2>&1 || fatal "missing required command: $1"
+}
+
+provider_from_type() {
+    local type_name="$1"
+    [[ "$type_name" == *_* ]] || fatal "TYPE must look like '<provider>_<name>', got: $type_name"
+    printf '%s\n' "${type_name%%_*}"
+}
+
+resource_name_from_type() {
+    local type_name="$1"
+    printf '%s\n' "${type_name#*_}"
+}
+
+repo_map_file() {
+    local provider="$1"
+    printf '%s/ZeePal/tfsrc/providers/%s.repo\n' "${XDG_CONFIG_HOME:-$HOME/.config}" "$provider"
+}
+
+remember_repo_override() {
+    local provider="$1"
+    local override_repo="$2"
+    local map_file
+
+    [[ -n "$override_repo" ]] || return 0
+    map_file="$(repo_map_file "$provider")"
+    mkdir -p "$(dirname "$map_file")"
+    printf '%s\n' "$override_repo" >"$map_file"
+}
+
+remembered_repo_for() {
+    local provider="$1"
+    local map_file
+
+    map_file="$(repo_map_file "$provider")"
+    [[ -s "$map_file" ]] || return 1
+    head -n 1 "$map_file"
+}
+
+existing_repo_url_for() {
+    local provider="$1"
+    local repo_root="$HOME/git/terraform"
+    local repo_dir
+    local remote_url
+
+    [[ -d "$repo_root" ]] || return 1
+
+    for repo_dir in "$repo_root/terraform-provider-$provider" "$repo_root"/*"$provider"*; do
+        [[ -d "$repo_dir/.git" ]] || continue
+        remote_url="$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)"
+        [[ -n "$remote_url" ]] || continue
+        printf '%s\n' "$remote_url"
+        return 0
+    done
+
+    return 1
+}
+
+repo_url_for() {
+    local provider="$1"
+    local google_channel="$2"
+    local override_repo="$3"
+
+    if [[ -n "$override_repo" ]]; then
+        printf '%s\n' "$override_repo"
+        return
+    fi
+
+    if [[ "$provider" == "google" ]]; then
+        case "$google_channel" in
+        stable) printf '%s\n' "https://github.com/hashicorp/terraform-provider-google.git" ;;
+        beta) printf '%s\n' "https://github.com/hashicorp/terraform-provider-google-beta.git" ;;
+        nightly) printf '%s\n' "https://github.com/hashicorp/terraform-provider-google-nightly.git" ;;
+        magic) printf '%s\n' "https://github.com/GoogleCloudPlatform/magic-modules.git" ;;
+        *) fatal "unsupported google channel: $google_channel" ;;
+        esac
+        return
+    fi
+
+    if remembered_repo_for "$provider"; then
+        return
+    fi
+
+    if existing_repo_url_for "$provider"; then
+        return
+    fi
+
+    printf 'https://github.com/hashicorp/terraform-provider-%s.git\n' "$provider"
+}
+
+repo_dir_for() {
+    local repo_url="$1"
+    local repo_name
+    repo_name="${repo_url##*/}"
+    repo_name="${repo_name%.git}"
+    printf '%s/%s\n' "$HOME/git/terraform" "$repo_name"
+}
+
+clone_if_missing() {
+    local repo_url="$1"
+    local repo_dir="$2"
+
+    mkdir -p "$(dirname "$repo_dir")"
+    if [[ -d "$repo_dir/.git" ]]; then
+        update_clean_main_if_stale "$repo_dir"
+        return
+    fi
+    if [[ -e "$repo_dir" ]]; then
+        fatal "$repo_dir exists but is not a git repo"
+    fi
+
+    git clone "$repo_url" "$repo_dir"
+}
+
+update_clean_main_if_stale() {
+    local repo_dir="$1"
+    local fetch_head="$repo_dir/.git/FETCH_HEAD"
+    local max_age_seconds=86400
+    local now
+    local last_update
+
+    [[ "$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD)" == "main" ]] || return 0
+    [[ -z "$(git -C "$repo_dir" status --porcelain)" ]] || return 0
+    [[ -w "$repo_dir/.git" ]] || return 0
+
+    now="$(date +%s)"
+    [[ -e "$fetch_head" ]] || return 0
+
+    last_update="$(stat -c %Y "$fetch_head")"
+    ((now - last_update > max_age_seconds)) || return 0
+
+    git -C "$repo_dir" pull --ff-only || echo "tfsrc: warning: git pull failed for $repo_dir; using existing checkout" >&2
+}
+
+editor_cmd() {
+    if [[ -n "${VISUAL:-}" ]]; then
+        printf '%s\n' "$VISUAL"
+        return
+    fi
+    if [[ -n "${EDITOR:-}" ]]; then
+        printf '%s\n' "$EDITOR"
+        return
+    fi
+    if command -v editor >/dev/null 2>&1; then
+        printf '%s\n' "editor"
+        return
+    fi
+    if command -v sensible-editor >/dev/null 2>&1; then
+        printf '%s\n' "sensible-editor"
+        return
+    fi
+    printf '%s\n' "vi"
+}
+
+camel_case() {
+    local input="$1"
+    local part
+    local output=""
+
+    IFS='_' read -ra parts <<<"$input"
+    for part in "${parts[@]}"; do
+        output+="${part^}"
+    done
+    printf '%s\n' "$output"
+}
+
+find_magic_modules_file() {
+    local repo_dir="$1"
+    local kind="$2"
+    local short_name="$3"
+    local resource_name
+    local matches=()
+
+    resource_name="$(camel_case "${short_name#*_}")"
+
+    if [[ "$kind" == "resource" ]]; then
+        if command -v fd >/dev/null 2>&1; then
+            mapfile -t matches < <(fd --type f --glob "${resource_name}.yaml" "$repo_dir/mmv1/products/${short_name%%_*}")
+        else
+            mapfile -t matches < <(find "$repo_dir/mmv1/products/${short_name%%_*}" -type f -name "${resource_name}.yaml")
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        if command -v fd >/dev/null 2>&1; then
+            mapfile -t matches < <(fd --type f --glob "${kind}_${short_name}.go.tmpl" "$repo_dir/mmv1/third_party/terraform")
+        else
+            mapfile -t matches < <(find "$repo_dir/mmv1/third_party/terraform" -type f -name "${kind}_${short_name}.go.tmpl")
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        if command -v fd >/dev/null 2>&1; then
+            mapfile -t matches < <(fd --type f --glob "${kind}_google_${short_name}.go" "$repo_dir/mmv1/third_party/terraform")
+        else
+            mapfile -t matches < <(find "$repo_dir/mmv1/third_party/terraform" -type f -name "${kind}_google_${short_name}.go")
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        return 1
+    fi
+
+    printf '%s\n' "${matches[0]}"
+}
+
+find_source_file() {
+    local repo_dir="$1"
+    local kind="$2"
+    local type_name="$3"
+    local provider="$4"
+    local short_name="$5"
+    local stem="${kind}_${short_name}.go"
+    local matches=()
+
+    if [[ "${repo_dir##*/}" == "magic-modules" ]]; then
+        find_magic_modules_file "$repo_dir" "$kind" "$short_name" && return
+        fatal "could not find Magic Modules ${kind} source for $type_name in $repo_dir"
+    fi
+
+    if command -v rg >/dev/null 2>&1; then
+        if [[ "$kind" == "resource" ]]; then
+            mapfile -t matches < <(rg --files-with-matches --glob '*.go' --fixed-strings "@SDKResource(\"$type_name\"" "$repo_dir" | sort)
+        else
+            mapfile -t matches < <(rg --files-with-matches --glob '*.go' --fixed-strings "@SDKDataSource(\"$type_name\"" "$repo_dir" | sort)
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        if command -v fd >/dev/null 2>&1; then
+            mapfile -t matches < <(fd --type f --glob "$stem" "$repo_dir")
+        else
+            mapfile -t matches < <(find "$repo_dir" -type f -name "$stem")
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        stem="${provider}_${short_name}.go"
+        if command -v fd >/dev/null 2>&1; then
+            mapfile -t matches < <(fd --type f --glob "$stem" "$repo_dir")
+        else
+            mapfile -t matches < <(find "$repo_dir" -type f -name "$stem")
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        stem="${kind}_${provider}_${short_name}.go"
+        if command -v fd >/dev/null 2>&1; then
+            mapfile -t matches < <(fd --type f --glob "$stem" "$repo_dir")
+        else
+            mapfile -t matches < <(find "$repo_dir" -type f -name "$stem")
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        stem="${kind}_${provider}_${short_name}_v1.go"
+        if command -v fd >/dev/null 2>&1; then
+            mapfile -t matches < <(fd --type f --glob "$stem" "$repo_dir")
+        else
+            mapfile -t matches < <(find "$repo_dir" -type f -name "$stem")
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        if command -v rg >/dev/null 2>&1; then
+            mapfile -t matches < <(rg --files-with-matches --glob '*.go' --fixed-strings "$type_name" "$repo_dir" | rg -v '(_test\.go$|/testdata/|/internal/generate/|/third_party/tgc/)' | sort)
+        else
+            mapfile -t matches < <(grep -RIl --include='*.go' "$type_name" "$repo_dir")
+        fi
+    fi
+
+    if ((${#matches[@]} == 0)); then
+        fatal "could not find ${kind} source for $type_name in $repo_dir"
+    fi
+
+    printf '%s\n' "${matches[0]}"
+}
+
+kind="resource"
+provider=""
+repo_override=""
+google_channel="stable"
+print_only="false"
+type_name=""
+
+while (($#)); do
+    case "$1" in
+    -d | --data)
+        kind="data_source"
+        shift
+        ;;
+    -p | --provider)
+        [[ $# -ge 2 ]] || fatal "$1 requires a value"
+        provider="$2"
+        shift 2
+        ;;
+    --repo)
+        [[ $# -ge 2 ]] || fatal "$1 requires a value"
+        repo_override="$2"
+        shift 2
+        ;;
+    --google-channel | --google-codebase)
+        [[ $# -ge 2 ]] || fatal "$1 requires a value"
+        google_channel="$2"
+        shift 2
+        ;;
+    --stable)
+        google_channel="stable"
+        shift
+        ;;
+    -b | --beta)
+        google_channel="beta"
+        shift
+        ;;
+    -n | --nightly)
+        google_channel="nightly"
+        shift
+        ;;
+    -m | --magic)
+        google_channel="magic"
+        shift
+        ;;
+    --print)
+        print_only="true"
+        shift
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --)
+        shift
+        break
+        ;;
+    -*)
+        fatal "unknown option: $1"
+        ;;
+    *)
+        [[ -z "$type_name" ]] || fatal "only one TYPE is supported"
+        type_name="$1"
+        shift
+        ;;
+    esac
+done
+
+[[ -n "$type_name" ]] || {
+    usage >&2
+    exit 2
+}
+[[ -n "$provider" ]] || provider="$(provider_from_type "$type_name")"
+short_name="$(resource_name_from_type "$type_name")"
+
+require_cmd git
+
+remember_repo_override "$provider" "$repo_override"
+repo_url="$(repo_url_for "$provider" "$google_channel" "$repo_override")"
+repo_dir="$(repo_dir_for "$repo_url")"
+clone_if_missing "$repo_url" "$repo_dir"
+source_file="$(find_source_file "$repo_dir" "$kind" "$type_name" "$provider" "$short_name")"
+
+if [[ "$print_only" == "true" ]]; then
+    printf '%s\n' "$source_file"
+    exit 0
+fi
+
+editor="$(editor_cmd)"
+printf 'Opening %s with %s\n' "$source_file" "$editor" >&2
+exec $editor "$source_file"

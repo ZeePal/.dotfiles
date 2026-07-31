@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: tfdoc [-d|--data] [-w|--web] [--provider PROVIDER] [--repo URL] [--stable|-b|--beta|-n|--nightly|-m|--magic] [--print] [--raw] TYPE
+
+Clone a Terraform provider repo under ~/git/terraform/ when missing and show the provider docs with bat.
+Use -w/--web to open the Terraform Registry docs URL with xdg-open instead.
+
+Examples:
+  tfdoc google_storage_bucket
+  tfdoc --stable google_storage_bucket
+  tfdoc -b google_storage_bucket
+  tfdoc -d google_storage_bucket
+  tfdoc --provider aws aws_instance
+  tfdoc -w google_netapp_volume
+
+Notes:
+  - TYPE is normally the Terraform resource/data source type, e.g. google_storage_bucket.
+  - Default repo mapping is https://github.com/hashicorp/terraform-provider-<provider>.git.
+  - Google channels match tfsource: stable, beta, nightly, magic.
+  - Web URLs use registry.terraform.io/providers/hashicorp/<provider>/latest/docs/<resources|data-sources>/<name>.
+  - By default tfdoc strips common Hugo front matter/shortcodes for cleaner terminal Markdown.
+EOF
+}
+
+fatal() {
+    echo "tfdoc: $*" >&2
+    exit 1
+}
+require_cmd() { command -v "$1" >/dev/null 2>&1 || fatal "missing required command: $1"; }
+
+provider_from_type() {
+    local type_name="$1"
+    [[ "$type_name" == *_* ]] || fatal "TYPE must look like '<provider>_<name>', got: $type_name"
+    printf '%s\n' "${type_name%%_*}"
+}
+
+resource_name_from_type() { printf '%s\n' "${1#*_}"; }
+
+repo_map_file() { printf '%s/ZeePal/tfsource/providers/%s.repo\n' "${XDG_CONFIG_HOME:-$HOME/.config}" "$1"; }
+
+remember_repo_override() {
+    local provider="$1" override_repo="$2" map_file
+    [[ -n "$override_repo" ]] || return 0
+    map_file="$(repo_map_file "$provider")"
+    mkdir -p "$(dirname "$map_file")"
+    printf '%s\n' "$override_repo" >"$map_file"
+}
+
+remembered_repo_for() {
+    local map_file
+    map_file="$(repo_map_file "$1")"
+    [[ -s "$map_file" ]] || return 1
+    head -n 1 "$map_file"
+}
+
+existing_repo_url_for() {
+    local provider="$1" repo_root="$HOME/git/terraform" repo_dir remote_url
+    [[ -d "$repo_root" ]] || return 1
+    for repo_dir in "$repo_root/terraform-provider-$provider" "$repo_root"/*"$provider"*; do
+        [[ -d "$repo_dir/.git" ]] || continue
+        remote_url="$(git -C "$repo_dir" remote get-url origin 2>/dev/null || true)"
+        [[ -n "$remote_url" ]] || continue
+        printf '%s\n' "$remote_url"
+        return 0
+    done
+    return 1
+}
+
+repo_url_for() {
+    local provider="$1" google_channel="$2" override_repo="$3"
+    if [[ -n "$override_repo" ]]; then
+        printf '%s\n' "$override_repo"
+        return
+    fi
+    if [[ "$provider" == "google" ]]; then
+        case "$google_channel" in
+        stable) printf '%s\n' "https://github.com/hashicorp/terraform-provider-google.git" ;;
+        beta) printf '%s\n' "https://github.com/hashicorp/terraform-provider-google-beta.git" ;;
+        nightly) printf '%s\n' "https://github.com/hashicorp/terraform-provider-google-nightly.git" ;;
+        magic) printf '%s\n' "https://github.com/GoogleCloudPlatform/magic-modules.git" ;;
+        *) fatal "unsupported google channel: $google_channel" ;;
+        esac
+        return
+    fi
+    if remembered_repo_for "$provider"; then return; fi
+    if existing_repo_url_for "$provider"; then return; fi
+    printf 'https://github.com/hashicorp/terraform-provider-%s.git\n' "$provider"
+}
+
+repo_dir_for() {
+    local repo_name
+    repo_name="${1##*/}"
+    repo_name="${repo_name%.git}"
+    printf '%s/%s\n' "$HOME/git/terraform" "$repo_name"
+}
+
+update_clean_main_if_stale() {
+    local repo_dir="$1" fetch_head="$1/.git/FETCH_HEAD" max_age_seconds=86400 now last_update
+    [[ "$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD)" == "main" ]] || return 0
+    [[ -z "$(git -C "$repo_dir" status --porcelain)" ]] || return 0
+    [[ -w "$repo_dir/.git" ]] || return 0
+    [[ -e "$fetch_head" ]] || return 0
+    now="$(date +%s)"
+    last_update="$(stat -c %Y "$fetch_head")"
+    ((now - last_update > max_age_seconds)) || return 0
+    git -C "$repo_dir" pull --ff-only || echo "tfdoc: warning: git pull failed for $repo_dir; using existing checkout" >&2
+}
+
+clone_if_missing() {
+    local repo_url="$1" repo_dir="$2"
+    mkdir -p "$(dirname "$repo_dir")"
+    if [[ -d "$repo_dir/.git" ]]; then
+        update_clean_main_if_stale "$repo_dir"
+        return
+    fi
+    [[ ! -e "$repo_dir" ]] || fatal "$repo_dir exists but is not a git repo"
+    git clone "$repo_url" "$repo_dir"
+}
+
+find_doc_file() {
+    local repo_dir="$1" kind="$2" type_name="$3" provider="$4" short_name="$5" docs_kind matches=()
+    if [[ "$kind" == "resource" ]]; then docs_kind="resources"; else docs_kind="data-sources"; fi
+
+    local website_kind
+    if [[ "$kind" == "resource" ]]; then website_kind="r"; else website_kind="d"; fi
+
+    local candidates=(
+        "$repo_dir/docs/$docs_kind/$short_name.md"
+        "$repo_dir/docs/$docs_kind/$short_name.html.markdown"
+        "$repo_dir/docs/$docs_kind/$type_name.md"
+        "$repo_dir/docs/$docs_kind/$type_name.html.markdown"
+        "$repo_dir/website/docs/$website_kind/$short_name.html.markdown"
+        "$repo_dir/website/docs/$website_kind/$short_name.md"
+        "$repo_dir/website/docs/$website_kind/$type_name.html.markdown"
+        "$repo_dir/website/docs/$website_kind/$type_name.md"
+        "$repo_dir/website/docs/$docs_kind/$short_name.html.markdown"
+        "$repo_dir/website/docs/$docs_kind/$short_name.md"
+        "$repo_dir/website/docs/$docs_kind/$type_name.html.markdown"
+        "$repo_dir/website/docs/$docs_kind/$type_name.md"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        [[ -f "$candidate" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+
+    if command -v fd >/dev/null 2>&1; then
+        mapfile -t matches < <(fd --type f --glob "${type_name}.md" "$repo_dir" | sort)
+        ((${#matches[@]} > 0)) || mapfile -t matches < <(fd --type f --glob "${type_name}.markdown" "$repo_dir" | sort)
+        ((${#matches[@]} > 0)) || mapfile -t matches < <(fd --type f --glob "${type_name}.html.markdown" "$repo_dir" | sort)
+        ((${#matches[@]} > 0)) || mapfile -t matches < <(fd --type f --glob "${short_name}.md" "$repo_dir" | sort)
+        ((${#matches[@]} > 0)) || mapfile -t matches < <(fd --type f --glob "${short_name}.markdown" "$repo_dir" | sort)
+        ((${#matches[@]} > 0)) || mapfile -t matches < <(fd --type f --glob "${short_name}.html.markdown" "$repo_dir" | sort)
+    else
+        mapfile -t matches < <(find "$repo_dir" -type f \( -name "$type_name.md" -o -name "$type_name.markdown" -o -name "$type_name.html.markdown" -o -name "$short_name.md" -o -name "$short_name.markdown" -o -name "$short_name.html.markdown" \) | sort)
+    fi
+
+    if ((${#matches[@]} == 0)) && command -v rg >/dev/null 2>&1; then
+        mapfile -t matches < <(rg --files-with-matches --glob '*.md' --glob '*.markdown' --fixed-strings "$type_name" "$repo_dir" | sort)
+    fi
+
+    ((${#matches[@]} > 0)) || fatal "could not find ${kind} docs for $type_name in $repo_dir"
+    printf '%s\n' "${matches[0]}"
+}
+
+registry_provider_for() {
+    local provider="$1" google_channel="$2"
+    if [[ "$provider" == "google" && "$google_channel" == "beta" ]]; then
+        printf '%s\n' "google-beta"
+        return
+    fi
+    printf '%s\n' "$provider"
+}
+
+registry_doc_url() {
+    local kind="$1" provider="$2" google_channel="$3" short_name="$4" docs_kind registry_provider
+    if [[ "$kind" == "resource" ]]; then docs_kind="resources"; else docs_kind="data-sources"; fi
+    registry_provider="$(registry_provider_for "$provider" "$google_channel")"
+    printf 'https://registry.terraform.io/providers/hashicorp/%s/latest/docs/%s/%s\n' \
+        "$registry_provider" "$docs_kind" "$short_name"
+}
+
+open_web_doc() {
+    local url="$1"
+    require_cmd xdg-open
+    xdg-open "$url" >/dev/null 2>&1 &
+}
+
+render_doc() {
+    local doc_file="$1" raw="$2" tmp_file
+    if [[ "$raw" == "true" ]]; then
+        bat --language markdown --style plain --paging always "$doc_file"
+        return
+    fi
+
+    tmp_file="$(mktemp --suffix=.md)"
+    pandoc -f markdown+yaml_metadata_block+tex_math_dollars -t gfm "$doc_file" 2>/dev/null |
+        sed -E \
+            -e '/^---$/,/^---$/d' \
+            -e 's/\{#[-A-Za-z0-9_]+\}//g' \
+            -e 's/\{\{<[^>]+>\}\}//g' \
+            -e 's/\{\{%[^%]+%\}\}//g' \
+            -e 's/^~>/> **Note:** /' \
+            -e 's/^!>/> **Warning:** /' \
+            >"$tmp_file"
+    bat --language markdown --style plain --paging always "$tmp_file"
+    rm -f "$tmp_file"
+}
+
+kind="resource"
+provider=""
+repo_override=""
+google_channel="stable"
+print_only="false"
+raw="false"
+web="false"
+type_name=""
+
+while (($#)); do
+    case "$1" in
+    -d | --data)
+        kind="data_source"
+        shift
+        ;;
+    -p | --provider)
+        [[ $# -ge 2 ]] || fatal "$1 requires a value"
+        provider="$2"
+        shift 2
+        ;;
+    --repo)
+        [[ $# -ge 2 ]] || fatal "$1 requires a value"
+        repo_override="$2"
+        shift 2
+        ;;
+    --google-channel | --google-codebase)
+        [[ $# -ge 2 ]] || fatal "$1 requires a value"
+        google_channel="$2"
+        shift 2
+        ;;
+    --stable)
+        google_channel="stable"
+        shift
+        ;;
+    -b | --beta)
+        google_channel="beta"
+        shift
+        ;;
+    -n | --nightly)
+        google_channel="nightly"
+        shift
+        ;;
+    -m | --magic)
+        google_channel="magic"
+        shift
+        ;;
+    --print)
+        print_only="true"
+        shift
+        ;;
+    --raw)
+        raw="true"
+        shift
+        ;;
+    -w | --web)
+        web="true"
+        shift
+        ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    --)
+        shift
+        break
+        ;;
+    -*) fatal "unknown option: $1" ;;
+    *)
+        [[ -z "$type_name" ]] || fatal "only one TYPE is supported"
+        type_name="$1"
+        shift
+        ;;
+    esac
+done
+
+[[ -n "$type_name" ]] || {
+    usage >&2
+    exit 2
+}
+[[ -n "$provider" ]] || provider="$(provider_from_type "$type_name")"
+short_name="$(resource_name_from_type "$type_name")"
+
+if [[ "$web" == "true" ]]; then
+    web_url="$(registry_doc_url "$kind" "$provider" "$google_channel" "$short_name")"
+    if [[ "$print_only" == "true" ]]; then
+        printf '%s\n' "$web_url"
+        exit 0
+    fi
+    open_web_doc "$web_url"
+    exit 0
+fi
+
+require_cmd git
+require_cmd bat
+[[ "$raw" == "true" ]] || require_cmd pandoc
+
+remember_repo_override "$provider" "$repo_override"
+repo_url="$(repo_url_for "$provider" "$google_channel" "$repo_override")"
+repo_dir="$(repo_dir_for "$repo_url")"
+clone_if_missing "$repo_url" "$repo_dir"
+doc_file="$(find_doc_file "$repo_dir" "$kind" "$type_name" "$provider" "$short_name")"
+
+if [[ "$print_only" == "true" ]]; then
+    printf '%s\n' "$doc_file"
+    exit 0
+fi
+
+render_doc "$doc_file" "$raw"

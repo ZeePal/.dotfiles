@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- PROMPT CONFIG: update this section when PR style changes ---
+PROMPT=$(
+    cat <<'PROMPT_EOF'
+Create a GitHub pull request title and body for the current git repository.
+
+You are being invoked by the `gpr` script. Do not create a PR, push, open a browser, or write any files except `.pr.yaml` at the git repository root.
+
+Requirements:
+- Review only committed changes that belong in this PR.
+- Ignore the working tree, unstaged changes, staged-but-uncommitted changes, untracked files, editor temp files, and local generated files.
+- Determine the git repository root with `git rev-parse --show-toplevel` and write output to `GIT_REPO_ROOT/.pr.yaml`.
+- If `GIT_REPO_ROOT/.pr.notes` exists, read it and use it as additional PR context.
+- If branch name or commits contain a Ticket number, use it in the title.
+- Keep the title short and specific.
+- Keep the body concise and useful for reviewers.
+- If the change is truly trivial, omit the `## Changes` section.
+- Add optional relationship/reference sections only when they have contents.
+- Use these optional section headings when relevant:
+  - `## Pre-Deployment` for manual commands or steps required before deployment, such as Terraform, gcloud, or AWS commands.
+  - `## Post-Deployment` for manual commands or checks required after deployment, such as Terraform, gcloud, or AWS commands.
+  - `## Related To` for related PRs, tickets, incidents, docs, or follow-up work.
+  - `## Depends On` for dependency PRs, tickets, or prerequisite work.
+  - `## References` for general references or `Ref:`/`References:` notes.
+- Put all optional sections below `## Changes`, in the order listed above.
+- Remove any optional section that has zero items.
+- Do not invent tickets, links, dependencies, references, or relationships.
+- Fail with a clear message instead of writing incomplete or invalid YAML if the committed PR changes cannot be determined.
+
+Suggested title style:
+Ticket-Number - Very short title
+
+Suggested body style:
+Very short 1 or 2 sentences of the highlevel change.
+
+## Changes
+- very very short bullet points of changes
+
+## Pre-Deployment
+- Run `terraform plan` in `infra/prod`.
+
+## Post-Deployment
+- Run `gcloud run services describe service-name --region australia-southeast1`.
+
+## Related To
+- https://github.com/org/repo/issues/123
+
+## Depends On
+- https://github.com/org/repo/pull/123
+
+Write exactly this YAML shape to `GIT_REPO_ROOT/.pr.yaml`:
+title: "Ticket-Number - Very short title"
+body: |-
+  Very short 1 or 2 sentences of the highlevel change.
+
+  ## Changes
+  - very very short bullet points of changes
+PROMPT_EOF
+)
+# --- END PROMPT CONFIG ---
+
+usage() {
+    cat >&2 <<'USAGE_EOF'
+Usage: gpr [-d|--dry-run] [-i|--interactive] [additional PR context...]
+       gpr -p|--pr
+
+Options:
+  -d, --dry-run      Stop after pi, print .pr.yaml, then delete it
+  -i, --interactive  Run pi interactively with the generated prompt as the initial message
+  -p, --pr           Push and create a draft PR from an existing .pr.yaml
+USAGE_EOF
+}
+
+fail() {
+    echo "gpr: $*" >&2
+    exit 1
+}
+
+repo_root() {
+    git rev-parse --show-toplevel 2>/dev/null || fail "not inside a git repository"
+}
+
+parse_args() {
+    DRY_RUN=false
+    INTERACTIVE=false
+    CREATE_PR_ONLY=false
+    EXTRA_CONTEXT=()
+
+    while (($#)); do
+        case "$1" in
+        -d | --dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        -i | --interactive)
+            INTERACTIVE=true
+            shift
+            ;;
+        -p | --pr)
+            CREATE_PR_ONLY=true
+            shift
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        --)
+            shift
+            EXTRA_CONTEXT+=("$@")
+            break
+            ;;
+        -*)
+            fail "unknown option: $1"
+            ;;
+        *)
+            EXTRA_CONTEXT+=("$1")
+            shift
+            ;;
+        esac
+    done
+
+    if [[ "$CREATE_PR_ONLY" == true ]]; then
+        [[ "$DRY_RUN" == false ]] || fail "--pr cannot be used with --dry-run"
+        [[ "$INTERACTIVE" == false ]] || fail "--pr cannot be used with --interactive"
+        [[ ${#EXTRA_CONTEXT[@]} -eq 0 ]] || fail "--pr does not accept positional arguments"
+    fi
+}
+
+build_prompt() {
+    local prompt="$PROMPT"
+    local extra="${EXTRA_CONTEXT[*]:-}"
+
+    if [[ -n "$extra" ]]; then
+        prompt+=$'\n\nAdditional user-provided PR context:\n'
+        prompt+="$extra"
+        prompt+=$'\n'
+    fi
+
+    printf '%s' "$prompt"
+}
+
+run_pi() {
+    local prompt="$1"
+
+    if [[ "$INTERACTIVE" == true ]]; then
+        pi "$prompt"
+        return
+    fi
+
+    pi -p "$prompt"
+}
+
+validate_pr_yaml() {
+    local pr_yaml="$1"
+
+    [[ -s "$pr_yaml" ]] || fail "missing or empty $pr_yaml"
+    yq -e '.title | type == "!!str" and length > 0' "$pr_yaml" >/dev/null || fail "invalid $pr_yaml: missing title"
+    yq -e '.body | type == "!!str" and length > 0' "$pr_yaml" >/dev/null || fail "invalid $pr_yaml: missing body"
+}
+
+print_dry_run() {
+    local pr_yaml="$1"
+
+    if command -v bat >/dev/null 2>&1; then
+        yq -P '.' "$pr_yaml" | bat --language yaml --style plain --paging never
+        return
+    fi
+
+    yq -P '.' "$pr_yaml"
+}
+
+create_draft_pr() {
+    local root="$1"
+    local pr_yaml="$2"
+    local title body pr_url
+
+    title="$(yq -r '.title' "$pr_yaml")"
+    body="$(yq -r '.body' "$pr_yaml")"
+
+    git push
+    pr_url="$(gh pr create --draft --title "$title" --body "$body")"
+    xdg-open "$pr_url" >/dev/null 2>&1 &
+    cleanup_pr_files "$root"
+
+    printf '%s\n' "$pr_url"
+}
+
+cleanup_pr_files() {
+    local root="$1"
+    rm -f -- "$root/.pr.yaml" "$root/.pr.notes"
+}
+
+main() {
+    parse_args "$@"
+
+    local root pr_yaml prompt
+    root="$(repo_root)"
+    pr_yaml="$root/.pr.yaml"
+
+    if [[ "$CREATE_PR_ONLY" == true ]]; then
+        validate_pr_yaml "$pr_yaml"
+        create_draft_pr "$root" "$pr_yaml"
+        return
+    fi
+
+    prompt="$(build_prompt)"
+
+    rm -f -- "$pr_yaml"
+    run_pi "$prompt"
+    validate_pr_yaml "$pr_yaml"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        print_dry_run "$pr_yaml"
+        rm -f -- "$pr_yaml"
+        return
+    fi
+
+    create_draft_pr "$root" "$pr_yaml"
+}
+
+main "$@"

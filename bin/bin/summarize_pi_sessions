@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""Summarize tool calls and usage from pi session JSONL files."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any
+
+SESSION_ROOT = Path("~/.pi/agent/sessions").expanduser()
+LOCAL_TZ = datetime.now().astimezone().tzinfo
+MILLION = Decimal("1000000")
+COPILOT_PRICING = {
+    "gpt-5-mini": {"input": Decimal("0.25"), "cacheRead": Decimal("0.025"), "output": Decimal("2")},
+    "gpt-5.4": {"input": Decimal("2.50"), "cacheRead": Decimal("0.25"), "output": Decimal("15")},
+    "gpt-5.5": {"input": Decimal("5"), "cacheRead": Decimal("0.50"), "output": Decimal("30")},
+}
+
+
+@dataclass
+class UsageTotals:
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    total_tokens: int = 0
+    cost_input: Decimal = Decimal("0")
+    cost_output: Decimal = Decimal("0")
+    cost_cache_read: Decimal = Decimal("0")
+    cost_cache_write: Decimal = Decimal("0")
+    cost_total: Decimal = Decimal("0")
+
+    def add(self, usage: dict[str, Any]) -> None:
+        in_t = to_int(usage.get("input")); out_t = to_int(usage.get("output"))
+        cr_t = to_int(usage.get("cacheRead")); cw_t = to_int(usage.get("cacheWrite"))
+        self.input += in_t; self.output += out_t; self.cache_read += cr_t; self.cache_write += cw_t
+        self.total_tokens += to_int(usage.get("totalTokens")) if usage.get("totalTokens") is not None else in_t + out_t + cr_t + cw_t
+        cost = usage.get("cost") if isinstance(usage.get("cost"), dict) else {}
+        ci = to_decimal(cost.get("input")); co = to_decimal(cost.get("output"))
+        ccr = to_decimal(cost.get("cacheRead")); ccw = to_decimal(cost.get("cacheWrite"))
+        self.cost_input += ci; self.cost_output += co; self.cost_cache_read += ccr; self.cost_cache_write += ccw
+        self.cost_total += to_decimal(cost.get("total")) if cost.get("total") is not None else ci + co + ccr + ccw
+
+
+@dataclass
+class Options:
+    paths: list[str]
+    recursive: bool
+    last: bool
+    time_range: tuple[datetime, datetime | None] | None
+    model_regex: re.Pattern[str] | None
+    model_exact: str | None
+    verbose: int
+
+
+@dataclass
+class BashStats:
+    simple: int = 0
+    chained: int = 0
+    chained_commands: int = 0
+    complex: int = 0
+    complex_lines: int = 0
+
+
+@dataclass
+class Summary:
+    user_prompts: int = 0
+    tool_counts: Counter[str] = None  # type: ignore[assignment]
+    bash: BashStats = None  # type: ignore[assignment]
+    provider_totals: dict[str, UsageTotals] = None  # type: ignore[assignment]
+    model_totals: dict[str, UsageTotals] = None  # type: ignore[assignment]
+    copilot_model_totals: dict[str, UsageTotals] = None  # type: ignore[assignment]
+    cwd_totals: dict[str, UsageTotals] = None  # type: ignore[assignment]
+    cwd_model_totals: dict[tuple[str, str], UsageTotals] = None  # type: ignore[assignment]
+    session_totals: dict[Path, UsageTotals] = None  # type: ignore[assignment]
+    session_model_totals: dict[tuple[Path, str], UsageTotals] = None  # type: ignore[assignment]
+    session_cwds: dict[Path, str] = None  # type: ignore[assignment]
+    total_usage: UsageTotals = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        self.tool_counts = Counter(); self.bash = BashStats()
+        self.provider_totals = defaultdict(UsageTotals); self.model_totals = defaultdict(UsageTotals)
+        self.copilot_model_totals = defaultdict(UsageTotals); self.cwd_totals = defaultdict(UsageTotals)
+        self.cwd_model_totals = defaultdict(UsageTotals); self.session_totals = defaultdict(UsageTotals)
+        self.session_model_totals = defaultdict(UsageTotals); self.session_cwds = {}
+        self.total_usage = UsageTotals()
+
+
+def to_int(value: Any) -> int:
+    if isinstance(value, bool) or value is None: return 0
+    try: return int(value)
+    except (TypeError, ValueError): return 0
+
+
+def to_decimal(value: Any) -> Decimal:
+    if isinstance(value, bool) or value is None: return Decimal("0")
+    try: return Decimal(str(value))
+    except (InvalidOperation, ValueError): return Decimal("0")
+
+
+def parse_args(argv: list[str]) -> Options:
+    parser = argparse.ArgumentParser(description="Summarize pi session JSONL files.")
+    parser.add_argument("paths", nargs="*", help="session dirs/files, real dirs/files, or session UUIDs")
+    parser.add_argument("-r", "--recursive", action="store_true", help="recurse into provided folders")
+    parser.add_argument("-l", "--last", action="store_true", help="only latest session per matched folder")
+    parser.add_argument("-t", "--time", help="only sessions modified/updated within period, e.g. 2w, 3d, 4h, 30m")
+    parser.add_argument("-v", "--verbose", action="count", default=0, help="show details; -vv also shows session breakdown")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("-m", "--model-regex", help="regex on provider/model:thinking")
+    group.add_argument("-M", "--model-exact", help="exact provider/model:thinking")
+    ns = parser.parse_args(argv)
+    raw_paths = list(ns.paths)
+    if not sys.stdin.isatty(): raw_paths.extend(line.strip() for line in sys.stdin if line.strip())
+    return Options(unique(raw_paths), ns.recursive, ns.last, parse_time_range(ns.time),
+                   re.compile(ns.model_regex) if ns.model_regex else None, ns.model_exact, ns.verbose)
+
+
+def unique(items: list[str]) -> list[str]:
+    seen: set[str] = set(); out: list[str] = []
+    for item in items:
+        if item not in seen: seen.add(item); out.append(item)
+    return out
+
+
+def parse_time_range(text: str | None) -> tuple[datetime, datetime | None] | None:
+    if not text:
+        return None
+    now = datetime.now(LOCAL_TZ)
+    s = text.strip().lower()
+    m = re.fullmatch(r"(\d+)([wdhm])", s)
+    if m:
+        n = int(m.group(1)); unit = m.group(2)
+        start = now - {"w": timedelta(weeks=n), "d": timedelta(days=n), "h": timedelta(hours=n), "m": timedelta(minutes=n)}[unit]
+        return start, None
+    explicit_range = parse_explicit_date_range(s)
+    if explicit_range:
+        return explicit_range
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    this_month = today.replace(day=1)
+    this_year = today.replace(month=1, day=1)
+    this_week = today - timedelta(days=today.weekday())
+    if s == "today":
+        return today, None
+    if s == "yesterday":
+        return today - timedelta(days=1), today
+    if s == "this week":
+        return this_week, None
+    if s == "last week":
+        return this_week - timedelta(weeks=1), this_week
+    if s == "this month":
+        return this_month, None
+    if s == "last month":
+        return (this_month - timedelta(days=1)).replace(day=1), this_month
+    if s == "this year":
+        return this_year, None
+    if s == "last year":
+        return this_year.replace(year=this_year.year - 1), this_year
+    raise ValueError(f"unsupported -t period: {text}")
+
+
+def parse_explicit_date_range(text: str) -> tuple[datetime, datetime | None] | None:
+    """Parse YYYY-MM-DD, YYYY-MM-DD<delimiter>YYYY-MM-DD, YYYY-MM, or YYYY."""
+    dates = re.findall(r"\d{4}-\d{2}-\d{2}", text)
+    if len(dates) == 1 and text == dates[0]:
+        start = local_midnight(dates[0])
+        return start, start + timedelta(days=1)
+    if len(dates) == 2:
+        start = local_midnight(dates[0])
+        end = local_midnight(dates[1])
+        if start > end:
+            start, end = end, start
+        return start, end + timedelta(days=1)
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        start = datetime.strptime(text, "%Y-%m").replace(tzinfo=LOCAL_TZ)
+        return start, next_month(start)
+    if re.fullmatch(r"\d{4}", text):
+        start = datetime(int(text), 1, 1, tzinfo=LOCAL_TZ)
+        return start, start.replace(year=start.year + 1)
+    return None
+
+
+def local_midnight(date_text: str) -> datetime:
+    return datetime.strptime(date_text, "%Y-%m-%d").replace(tzinfo=LOCAL_TZ)
+
+
+def next_month(value: datetime) -> datetime:
+    if value.month == 12:
+        return value.replace(year=value.year + 1, month=1)
+    return value.replace(month=value.month + 1)
+
+
+def session_dir_for_cwd(cwd: Path) -> Path:
+    return SESSION_ROOT / session_dir_name(cwd)
+
+
+def session_dir_name(cwd: Path) -> str:
+    normalized = str(cwd.expanduser().absolute()).strip("/").replace("/", "-")
+    return f"--{normalized}--"
+
+
+def recursive_session_dirs_for_cwd(cwd: Path) -> list[Path]:
+    prefix = session_dir_name(cwd)[:-2] + "-"
+    return [path for path in SESSION_ROOT.glob(f"{prefix}*--") if path.is_dir()]
+
+
+def resolve_paths(options: Options) -> list[Path]:
+    inputs = options.paths or [str(SESSION_ROOT)]
+    files: list[Path] = []
+    for raw in inputs:
+        matches = resolve_one(raw, options.recursive)
+        if not matches: raise FileNotFoundError(f"no matching pi sessions for: {raw}")
+        files.extend(matches)
+    files = sorted({p.resolve() for p in files})
+    if options.time_range:
+        start, end = options.time_range
+        files = [p for p in files if is_in_time_range(p, start, end)]
+    if options.model_regex or options.model_exact: files = [p for p in files if session_matches_model(p, options)]
+    if options.last: files = latest_per_parent(files)
+    if not files: raise FileNotFoundError("no matching pi sessions after filters")
+    return files
+
+
+def resolve_one(raw: str, recursive: bool) -> list[Path]:
+    expanded = Path(os.path.expandvars(os.path.expanduser(raw)))
+    candidates = [expanded]
+    if not str(expanded).startswith(str(SESSION_ROOT)):
+        mapped = session_dir_for_cwd(expanded)
+        candidates.append(mapped)
+        if recursive:
+            candidates.extend(recursive_session_dirs_for_cwd(expanded))
+    uuid_matches = list(SESSION_ROOT.glob(f"*/{raw}.jsonl")) + list(SESSION_ROOT.glob(f"*/*_{raw}.jsonl"))
+    out: list[Path] = [p for p in uuid_matches if p.is_file()]
+    for c in candidates:
+        if c.is_file(): out.append(c)
+        elif c.is_dir() and c.resolve() == SESSION_ROOT.resolve():
+            out.extend(c.rglob("*.jsonl") if recursive else c.glob("*/*.jsonl"))
+        elif c.is_dir():
+            out.extend(c.rglob("*.jsonl") if recursive else c.glob("*.jsonl"))
+    return [p for p in out if is_under_sessions(p)]
+
+
+def is_under_sessions(path: Path) -> bool:
+    try: path.resolve().relative_to(SESSION_ROOT.resolve()); return True
+    except ValueError: return False
+
+
+def is_in_time_range(path: Path, start: datetime, end: datetime | None) -> bool:
+    modified = datetime.fromtimestamp(path.stat().st_mtime, LOCAL_TZ)
+    return modified >= start and (end is None or modified < end)
+
+
+def latest_per_parent(files: list[Path]) -> list[Path]:
+    latest: dict[Path, Path] = {}
+    for p in files:
+        if p.parent not in latest or p.stat().st_mtime > latest[p.parent].stat().st_mtime: latest[p.parent] = p
+    return sorted(latest.values())
+
+
+def session_matches_model(path: Path, options: Options) -> bool:
+    provider = "unknown"; model = "unknown"; thinking = ""
+    for entry in iter_jsonl(path):
+        if entry.get("type") == "model_change":
+            provider = str(entry.get("provider") or provider)
+            model = str(entry.get("modelId") or entry.get("model") or model)
+        elif entry.get("type") == "thinking_level_change":
+            thinking = str(entry.get("thinkingLevel") or "")
+        elif entry.get("type") == "message":
+            msg = entry.get("message")
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            provider = str(msg.get("provider") or provider)
+            model = str(msg.get("model") or model)
+        else:
+            continue
+        key = f"{provider}/{model}:{thinking}"
+        if options.model_exact and key == options.model_exact:
+            return True
+        if options.model_regex and options.model_regex.search(key):
+            return True
+    return False
+
+
+def iter_jsonl(path: Path):
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, raw in enumerate(handle, 1):
+            if not raw.strip(): continue
+            try: yield json.loads(raw)
+            except json.JSONDecodeError as exc: raise ValueError(f"Invalid JSON in {path}:{line_number}: {exc.msg}") from exc
+
+
+def summarize_session(path: Path, summary: Summary) -> None:
+    cwd = cwd_from_session_path(path)
+    summary.session_cwds[path] = cwd
+    for entry in iter_jsonl(path):
+        if entry.get("type") == "session" and isinstance(entry.get("cwd"), str):
+            cwd = entry["cwd"]
+            summary.session_cwds[path] = cwd
+            continue
+        if entry.get("type") != "message": continue
+        msg = entry.get("message")
+        if not isinstance(msg, dict): continue
+        if msg.get("role") == "user": summary.user_prompts += 1; continue
+        if msg.get("role") != "assistant": continue
+        collect_tool_calls(msg.get("content"), summary)
+        collect_usage(msg, summary, cwd, path)
+
+
+def cwd_from_session_path(path: Path) -> str:
+    name = path.parent.name
+    if name.startswith("--") and name.endswith("--"):
+        return "/" + name[2:-2].replace("-", "/")
+    return str(path.parent)
+
+
+def collect_tool_calls(content: Any, summary: Summary) -> None:
+    if not isinstance(content, list): return
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "toolCall": continue
+        name = block.get("name")
+        if not isinstance(name, str) or not name: continue
+        summary.tool_counts[name] += 1
+        if name == "bash": classify_bash(block.get("arguments"), summary.bash)
+
+
+def classify_bash(arguments: Any, stats: BashStats) -> None:
+    command = arguments.get("command") if isinstance(arguments, dict) else ""
+    if not isinstance(command, str): command = ""
+    heredoc_lines = count_complex_lines(command)
+    if heredoc_lines is not None:
+        stats.complex += 1
+        stats.complex_lines += heredoc_lines
+        return
+    command_count = len(re.findall(r"&&|\|\||;|\|", command)) + 1
+    command_count += len([line for line in command.splitlines()[1:] if line.strip()])
+    if command_count <= 3 and command.count("\n") <= 2:
+        stats.simple += 1
+    else:
+        stats.chained += 1
+        stats.chained_commands += command_count
+
+
+def count_complex_lines(command: str) -> int | None:
+    """Count complex bash lines, or return None when no heredoc exists."""
+    if re.search(r"\bpython3\s+-\s*<<-?\s*['\"]?PY['\"]?", command):
+        return max(1, command.count("\n") + 1)
+    return count_heredoc_body_lines(command)
+
+
+def count_heredoc_body_lines(command: str) -> int | None:
+    """Count ephemeral heredoc body lines, or return None when no heredoc exists."""
+    lines = command.splitlines()
+    total = 0
+    found = False
+    index = 0
+    while index < len(lines):
+        match = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", lines[index])
+        if not match:
+            index += 1
+            continue
+        found = True
+        marker = match.group(1)
+        index += 1
+        body_start = index
+        while index < len(lines) and lines[index].strip() != marker:
+            index += 1
+        total += max(0, index - body_start)
+        if index < len(lines):
+            index += 1
+    return total if found else None
+
+
+def collect_usage(message: dict[str, Any], summary: Summary, cwd: str, path: Path) -> None:
+    usage = message.get("usage")
+    if not isinstance(usage, dict): return
+    provider = str(message.get("provider") or "unknown"); model = str(message.get("model") or "unknown")
+    model_key = f"{provider}/{model}"
+    summary.provider_totals[provider].add(usage); summary.model_totals[model_key].add(usage)
+    if model in COPILOT_PRICING: summary.copilot_model_totals[model].add(usage)
+    summary.cwd_totals[cwd].add(usage); summary.cwd_model_totals[(cwd, model_key)].add(usage)
+    summary.session_totals[path].add(usage); summary.session_model_totals[(path, model_key)].add(usage)
+    summary.total_usage.add(usage)
+
+
+def price(tokens: int, rate: Decimal) -> Decimal: return Decimal(tokens) * rate / MILLION
+
+def preview_cost_for_model(model_key: str, totals: UsageTotals, kind: str) -> Decimal:
+    model = model_key.rsplit("/", 1)[-1]
+    if model not in COPILOT_PRICING:
+        return Decimal("0")
+    if kind == "input":
+        return price(totals.input, COPILOT_PRICING[model]["input"])
+    if kind == "output":
+        return price(totals.output, COPILOT_PRICING[model]["output"])
+    if kind == "cacheRead":
+        return price(totals.cache_read, COPILOT_PRICING[model]["cacheRead"])
+    return Decimal("0")
+
+
+def preview_cost_total(summary: Summary, kind: str) -> Decimal:
+    total = Decimal("0")
+    for model_key, totals in summary.model_totals.items():
+        total += preview_cost_for_model(model_key, totals, kind)
+    return total
+
+
+def fmt_cost(value: Decimal) -> str: return f"{value:.10f}".rstrip("0").rstrip(".") or "0"
+
+def usage_line(label: str, tokens: int, cost: Decimal, preview: Decimal | None, force_star: bool = False) -> str:
+    shown = cost if cost else (preview or Decimal("0"))
+    star = "*" if force_star or (not cost and preview) else ""
+    return f"    {label:<12} {tokens:>12,} / ${fmt_cost(shown)}{star}"
+
+
+def displayed_costs(totals: UsageTotals, previews: tuple[Decimal, Decimal, Decimal]) -> tuple[Decimal, Decimal, Decimal, bool]:
+    p_in, p_out, p_cr = previews
+    used_preview = (totals.cost_input == 0 and p_in > 0) or (totals.cost_output == 0 and p_out > 0)
+    used_preview = used_preview or (totals.cost_cache_read == 0 and p_cr > 0)
+    return (
+        totals.cost_input if totals.cost_input else p_in,
+        totals.cost_output if totals.cost_output else p_out,
+        totals.cost_cache_read if totals.cost_cache_read else p_cr,
+        used_preview,
+    )
+
+
+def render_usage_block(title: str, totals: UsageTotals, previews: tuple[Decimal, Decimal, Decimal]) -> list[str]:
+    d_in, d_out, d_cr, used_preview = displayed_costs(totals, previews)
+    displayed_total = d_in + d_out + d_cr
+    return [
+        f"  {title}:",
+        usage_line("input:", totals.input, totals.cost_input, previews[0]),
+        usage_line("output:", totals.output, totals.cost_output, previews[1]),
+        usage_line("cacheRead:", totals.cache_read, totals.cost_cache_read, previews[2]),
+        usage_line("totalTokens:", totals.total_tokens, displayed_total, None, used_preview),
+    ]
+
+
+def render_usage(summary: Summary) -> list[str]:
+    lines = ["Usage:"]
+    sorted_models = sorted(summary.model_totals.items(), key=lambda item: (-item[1].total_tokens, item[0]))
+    model_previews = {
+        key: tuple(preview_cost_for_model(key, totals, kind) for kind in ("input", "output", "cacheRead"))
+        for key, totals in sorted_models
+    }
+    if len(sorted_models) == 1:
+        model_key, totals = sorted_models[0]
+        lines.extend(render_usage_block(model_key, totals, model_previews[model_key]))
+        return lines
+    total_display = [Decimal("0"), Decimal("0"), Decimal("0")]
+    used_preview = False
+    for model_key, totals in sorted_models:
+        lines.extend(render_usage_block(model_key, totals, model_previews[model_key]))
+        d_in, d_out, d_cr, model_used_preview = displayed_costs(totals, model_previews[model_key])
+        total_display[0] += d_in; total_display[1] += d_out; total_display[2] += d_cr
+        used_preview = used_preview or model_used_preview
+    total = summary.total_usage
+    total_cost = sum(total_display)
+    lines.extend([
+        "  Total:",
+        usage_line("input:", total.input, total_display[0], None, used_preview),
+        usage_line("output:", total.output, total_display[1], None, used_preview),
+        usage_line("cacheRead:", total.cache_read, total_display[2], None, used_preview),
+        usage_line("totalTokens:", total.total_tokens, total_cost, None, used_preview),
+    ])
+    return lines
+
+
+def render_report(paths: list[Path], summary: Summary, verbose: int = 0) -> str:
+    lines = [f"Sessions: {len(paths)}", f"User prompts: {summary.user_prompts}", "", "Tool calls:"]
+    for name, count in sorted(summary.tool_counts.items(), key=lambda x: (-x[1], x[0])):
+        if name == "bash":
+            b = summary.bash; lines.append(f"  bash: {count}")
+            lines.append(f"    simple: {b.simple}")
+            lines.append(f"    chained: {b.chained} ({b.chained_commands} commands)")
+            lines.append(f"    complex: {b.complex} ({b.complex_lines} lines)")
+        else: lines.append(f"  {name}: {count}")
+    if not summary.tool_counts: lines.append("  none")
+    lines.extend(["", *render_usage(summary)])
+    if verbose:
+        lines.extend(["", *render_details(summary, verbose)])
+    return "\n".join(lines)
+
+
+def render_details(summary: Summary, verbose: int) -> list[str]:
+    lines = ["Details:"]
+    if not summary.cwd_totals:
+        lines.append("  none")
+        return lines
+    costs = {cwd: displayed_cwd_cost(summary, cwd) for cwd in summary.cwd_totals}
+    rows = sorted(summary.cwd_totals.items(), key=lambda item: (-costs[item[0]][0], -item[1].total_tokens, item[0]))
+    width = max(len(cwd) for cwd, _ in rows) + 1
+    for cwd, totals in rows:
+        cost, used_preview = costs[cwd]
+        star = "*" if used_preview else ""
+        lines.append(f"  {cwd + ':':<{width}} {totals.total_tokens:>12,} / ${fmt_cost(cost)}{star}")
+        if verbose >= 2 and session_count_for_cwd(summary, cwd) > 1:
+            lines.extend(render_session_details(summary, cwd, width))
+    return lines
+
+
+def session_count_for_cwd(summary: Summary, cwd: str) -> int:
+    return sum(1 for path in summary.session_totals if summary.session_cwds.get(path) == cwd)
+
+
+def render_session_details(summary: Summary, cwd: str, parent_width: int) -> list[str]:
+    rows = [(path, totals) for path, totals in summary.session_totals.items() if summary.session_cwds.get(path) == cwd]
+    rows.sort(key=lambda item: (-displayed_session_cost(summary, item[0])[0], -item[1].total_tokens, item[0].name))
+    lines: list[str] = []
+    for path, totals in rows:
+        cost, used_preview = displayed_session_cost(summary, path)
+        star = "*" if used_preview else ""
+        session_id = path.stem.rsplit("_", 1)[-1]
+        lines.append(f"    {session_id + ':':<{parent_width - 2}} {totals.total_tokens:>12,} / ${fmt_cost(cost)}{star}")
+    return lines
+
+
+def displayed_cwd_cost(summary: Summary, cwd: str) -> tuple[Decimal, bool]:
+    total = Decimal("0")
+    used_preview = False
+    for (row_cwd, model_key), totals in summary.cwd_model_totals.items():
+        if row_cwd != cwd:
+            continue
+        previews = tuple(preview_cost_for_model(model_key, totals, kind) for kind in ("input", "output", "cacheRead"))
+        d_in, d_out, d_cr, model_used_preview = displayed_costs(totals, previews)
+        total += d_in + d_out + d_cr
+        used_preview = used_preview or model_used_preview
+    return total, used_preview
+
+
+def displayed_session_cost(summary: Summary, path: Path) -> tuple[Decimal, bool]:
+    total = Decimal("0")
+    used_preview = False
+    for (row_path, model_key), totals in summary.session_model_totals.items():
+        if row_path != path:
+            continue
+        previews = tuple(preview_cost_for_model(model_key, totals, kind) for kind in ("input", "output", "cacheRead"))
+        d_in, d_out, d_cr, model_used_preview = displayed_costs(totals, previews)
+        total += d_in + d_out + d_cr
+        used_preview = used_preview or model_used_preview
+    return total, used_preview
+
+
+def main(argv: list[str] | None = None) -> int:
+    options = parse_args(argv or sys.argv[1:]); paths = resolve_paths(options); summary = Summary()
+    for path in paths: summarize_session(path, summary)
+    print(render_report(paths, summary, options.verbose))
+    if summary.total_usage.cost_total == 0 and not summary.copilot_model_totals:
+        print("warning: costs are $0 and no preview cost data is available", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    try: raise SystemExit(main())
+    except (FileNotFoundError, ValueError, re.error) as exc:
+        print(f"error: {exc}", file=sys.stderr); raise SystemExit(1)

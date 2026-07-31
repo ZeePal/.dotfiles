@@ -22,10 +22,16 @@
    },
    "providers": {
       "@josephschmitt/store.raycast.gif-search": {
-         "entrypoints": {
-            "search": {
-               "enabled": true
-            }
+         "enabled": true,
+         "preferences": {
+            "defaultAction": "pasteFile",
+            "downloadPath": "",
+            "giphyLocale": "en",
+            "gridItemSize": "medium",
+            "gridTrendingItemSize": "medium",
+            "hideFilename": true,
+            "klipyLocale": "en",
+            "maxResults": "20"
          }
       },
       "@mblode/store.raycast.google-search": {

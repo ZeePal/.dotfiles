@@ -128,7 +128,7 @@ function ds {
 
 alias t=terraform
 alias trm="rm -rf .terraform/ .terraform.lock.hcl"
-alias ti="terraform init"
+alias ti="terraform init -reconfigure -upgrade"
 alias tv="terraform validate"
 
 alias tp="terraform plan -parallelism=1000 -out plan.tfplan"

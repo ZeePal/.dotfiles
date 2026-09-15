@@ -1,38 +1,38 @@
 {
-  "lastChangelogVersion": "0.83.0",
-  "collapseChangelog": true,
-  "defaultProvider": "github-copilot",
-  "defaultModel": "gpt-5.5",
-  "defaultThinkingLevel": "low",
-  "packages": [
-    "npm:@ifi/oh-pi-themes"
-  ],
-  "theme": "tokyo-night",
-  "quietStartup": true,
-  "enabledModels": [
-    "github-copilot/gpt-5.5",
-    "github-copilot/claude-sonnet-4.6",
-    "github-copilot/gemini-3.1-pro-preview",
-    "github-copilot/claude-opus-4.6"
-  ],
-  "ZeePal": {
-    "sandbox": {
-      "fs": "write",
-      "net": "unrestricted",
-      "network_proxy": {
-        "allow": [
-          "registry.terraform.io",
-          "releases.hashicorp.com",
-          "checkpoint-api.hashicorp.com",
-          "github.com",
-          "pypi.org",
-          "files.pythonhosted.org",
-          "registry.npmjs.org",
-          "docs.cloud.google.com",
-          "cloud.google.com"
-        ],
-        "deny": []
-      }
+    "lastChangelogVersion": "0.85.1",
+    "collapseChangelog": true,
+    "defaultProvider": "openai-codex",
+    "defaultModel": "gpt-5.6-sol",
+    "defaultThinkingLevel": "low",
+    "packages": [
+        "npm:@ifi/oh-pi-themes",
+        "npm:pi-chatgpt-limit"
+    ],
+    "theme": "tokyo-night",
+    "quietStartup": true,
+    "enabledModels": [
+        "openai-codex/gpt-5.6-sol",
+        "openai-codex/gpt-6-astra",
+        "github-copilot/gpt-5.6-sol"
+    ],
+    "ZeePal": {
+        "sandbox": {
+            "fs": "write",
+            "net": "unrestricted",
+            "network_proxy": {
+                "allow": [
+                    "registry.terraform.io",
+                    "releases.hashicorp.com",
+                    "checkpoint-api.hashicorp.com",
+                    "github.com",
+                    "pypi.org",
+                    "files.pythonhosted.org",
+                    "registry.npmjs.org",
+                    "docs.cloud.google.com",
+                    "cloud.google.com"
+                ],
+                "deny": []
+            }
+        }
     }
-  }
 }

@@ -419,26 +419,36 @@ def usage_line(label: str, tokens: int, cost: Decimal, preview: Decimal | None, 
     return f"    {label:<12} {tokens:>12,} / ${fmt_cost(shown)}{star}"
 
 
-def displayed_costs(totals: UsageTotals, previews: tuple[Decimal, Decimal, Decimal]) -> tuple[Decimal, Decimal, Decimal, bool]:
-    p_in, p_out, p_cr = previews
+def displayed_costs(
+    totals: UsageTotals,
+    previews: tuple[Decimal, Decimal, Decimal, Decimal],
+) -> tuple[Decimal, Decimal, Decimal, Decimal, bool]:
+    p_in, p_out, p_cr, p_cw = previews
     used_preview = (totals.cost_input == 0 and p_in > 0) or (totals.cost_output == 0 and p_out > 0)
     used_preview = used_preview or (totals.cost_cache_read == 0 and p_cr > 0)
+    used_preview = used_preview or (totals.cost_cache_write == 0 and p_cw > 0)
     return (
         totals.cost_input if totals.cost_input else p_in,
         totals.cost_output if totals.cost_output else p_out,
         totals.cost_cache_read if totals.cost_cache_read else p_cr,
+        totals.cost_cache_write if totals.cost_cache_write else p_cw,
         used_preview,
     )
 
 
-def render_usage_block(title: str, totals: UsageTotals, previews: tuple[Decimal, Decimal, Decimal]) -> list[str]:
-    d_in, d_out, d_cr, used_preview = displayed_costs(totals, previews)
-    displayed_total = d_in + d_out + d_cr
+def render_usage_block(
+    title: str,
+    totals: UsageTotals,
+    previews: tuple[Decimal, Decimal, Decimal, Decimal],
+) -> list[str]:
+    d_in, d_out, d_cr, d_cw, used_preview = displayed_costs(totals, previews)
+    displayed_total = d_in + d_out + d_cr + d_cw
     return [
         f"  {title}:",
         usage_line("input:", totals.input, totals.cost_input, previews[0]),
         usage_line("output:", totals.output, totals.cost_output, previews[1]),
         usage_line("cacheRead:", totals.cache_read, totals.cost_cache_read, previews[2]),
+        usage_line("cacheWrite:", totals.cache_write, totals.cost_cache_write, previews[3]),
         usage_line("totalTokens:", totals.total_tokens, displayed_total, None, used_preview),
     ]
 
@@ -447,19 +457,23 @@ def render_usage(summary: Summary) -> list[str]:
     lines = ["Usage:"]
     sorted_models = sorted(summary.model_totals.items(), key=lambda item: (-item[1].total_tokens, item[0]))
     model_previews = {
-        key: tuple(preview_cost_for_model(key, totals, kind) for kind in ("input", "output", "cacheRead"))
+        key: tuple(
+            preview_cost_for_model(key, totals, kind)
+            for kind in ("input", "output", "cacheRead", "cacheWrite")
+        )
         for key, totals in sorted_models
     }
     if len(sorted_models) == 1:
         model_key, totals = sorted_models[0]
         lines.extend(render_usage_block(model_key, totals, model_previews[model_key]))
         return lines
-    total_display = [Decimal("0"), Decimal("0"), Decimal("0")]
+    total_display = [Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0")]
     used_preview = False
     for model_key, totals in sorted_models:
         lines.extend(render_usage_block(model_key, totals, model_previews[model_key]))
-        d_in, d_out, d_cr, model_used_preview = displayed_costs(totals, model_previews[model_key])
-        total_display[0] += d_in; total_display[1] += d_out; total_display[2] += d_cr
+        d_in, d_out, d_cr, d_cw, model_used_preview = displayed_costs(totals, model_previews[model_key])
+        for index, cost in enumerate((d_in, d_out, d_cr, d_cw)):
+            total_display[index] += cost
         used_preview = used_preview or model_used_preview
     total = summary.total_usage
     total_cost = sum(total_display)
@@ -468,6 +482,7 @@ def render_usage(summary: Summary) -> list[str]:
         usage_line("input:", total.input, total_display[0], None, used_preview),
         usage_line("output:", total.output, total_display[1], None, used_preview),
         usage_line("cacheRead:", total.cache_read, total_display[2], None, used_preview),
+        usage_line("cacheWrite:", total.cache_write, total_display[3], None, used_preview),
         usage_line("totalTokens:", total.total_tokens, total_cost, None, used_preview),
     ])
     return lines
@@ -528,9 +543,12 @@ def displayed_cwd_cost(summary: Summary, cwd: str) -> tuple[Decimal, bool]:
     for (row_cwd, model_key), totals in summary.cwd_model_totals.items():
         if row_cwd != cwd:
             continue
-        previews = tuple(preview_cost_for_model(model_key, totals, kind) for kind in ("input", "output", "cacheRead"))
-        d_in, d_out, d_cr, model_used_preview = displayed_costs(totals, previews)
-        total += d_in + d_out + d_cr
+        previews = tuple(
+            preview_cost_for_model(model_key, totals, kind)
+            for kind in ("input", "output", "cacheRead", "cacheWrite")
+        )
+        d_in, d_out, d_cr, d_cw, model_used_preview = displayed_costs(totals, previews)
+        total += d_in + d_out + d_cr + d_cw
         used_preview = used_preview or model_used_preview
     return total, used_preview
 
@@ -541,9 +559,12 @@ def displayed_session_cost(summary: Summary, path: Path) -> tuple[Decimal, bool]
     for (row_path, model_key), totals in summary.session_model_totals.items():
         if row_path != path:
             continue
-        previews = tuple(preview_cost_for_model(model_key, totals, kind) for kind in ("input", "output", "cacheRead"))
-        d_in, d_out, d_cr, model_used_preview = displayed_costs(totals, previews)
-        total += d_in + d_out + d_cr
+        previews = tuple(
+            preview_cost_for_model(model_key, totals, kind)
+            for kind in ("input", "output", "cacheRead", "cacheWrite")
+        )
+        d_in, d_out, d_cr, d_cw, model_used_preview = displayed_costs(totals, previews)
+        total += d_in + d_out + d_cr + d_cw
         used_preview = used_preview or model_used_preview
     return total, used_preview
 

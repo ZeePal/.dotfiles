@@ -6,7 +6,7 @@
     "defaultThinkingLevel": "low",
     "packages": [
         "npm:@ifi/oh-pi-themes",
-        "npm:pi-chatgpt-limit"
+        "npm:@latentminds/pi-quotas"
     ],
     "theme": "tokyo-night",
     "quietStartup": true,

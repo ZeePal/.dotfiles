@@ -4,6 +4,7 @@
 - **Locality of Behaviour:** Keep the logic that triggers a behavior close to the behavior itself
 - **DRY & Modular:** Use reusable modules and inherited configs. Keep repositories small and focused
 - **Fail-Safe & Early Validation:** Extensive pre-merge checks, schema validation, and detailed error reporting
+- **Measure Twice, Cut Once:** Verify assumptions against authoritative vendor documentation and link non-obvious constraints close to the code or decision
 - **IaC & GitOps:** Everything in version control. All changes via PR with automated plan reviews
 - **Rule of Three:** No premature abstraction; wait until you've written the same pattern three times
 - **Configuration-Driven:** YAML configs drive infrastructure with minimal code changes
@@ -12,6 +13,7 @@
 - **Clarity > Cleverness:** Prefer explicit, readable logic over dense, "clever" one-liners
 - **Finish the Job:** Handle edge cases, clean up technical debt in your path, and ensure "Definition of Done" includes verification. Don't gold-plate, but don't leave it "half-baked."
 - **Be Explicit**: Make all intentions clear and unambiguous in both code and communication
+- **Clarify Before Acting:** If required information is missing or intent is ambiguous, stop and ask. Never make assumptions to complete the task.
 
 ## Communication Style
 - Be direct and concise
@@ -37,6 +39,9 @@
 - Prefer small, focused functions
 - Use early returns over nested conditionals
 - Type hints where possible
+- Order Terraform block fields from broad to specific: meta-arguments (`for_each`, `count`, `provider`, `source`, `version`), then `project`/`project_id`, `region`/`location`, a blank
+ line, resource-specific fields, nested blocks, other boilerplate controls and finally `lifecycle`, `depends_on`.
+- Within each group, prioritise identity and important behavioural fields over routine settings such as encryption, labels, and other boilerplate.
 
 ### Zero Warnings Policy
 - Fix every warning from every tool (linters, type checkers, compilers, tests)

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Model passed to pi via --model; leave empty to use pi's default model.
+MODEL=""
+
 # --- PROMPT CONFIG: update this section when PR style changes ---
 PROMPT=$(
     cat <<'PROMPT_EOF'
@@ -63,10 +66,11 @@ PROMPT_EOF
 
 usage() {
     cat >&2 <<'USAGE_EOF'
-Usage: gpr [-d|--dry-run] [-i|--interactive] [additional PR context...]
-       gpr -p|--pr
+Usage: gpr [-b|--branch NAME] [-d|--dry-run] [-i|--interactive] [additional PR context...]
+       gpr -p|--pr [-b|--branch NAME]
 
 Options:
+  -b, --branch NAME  Target branch to merge into instead of the repository default
   -d, --dry-run      Stop after pi, print .pr.yaml, then delete it
   -i, --interactive  Run pi interactively with the generated prompt as the initial message
   -p, --pr           Push and create a draft PR from an existing .pr.yaml
@@ -86,10 +90,17 @@ parse_args() {
     DRY_RUN=false
     INTERACTIVE=false
     CREATE_PR_ONLY=false
+    TARGET_BRANCH=""
     EXTRA_CONTEXT=()
 
     while (($#)); do
         case "$1" in
+        -b | --branch)
+            (($# >= 2)) || fail "$1 requires a branch name"
+            [[ -n "$2" && "$2" != -* ]] || fail "$1 requires a branch name"
+            TARGET_BRANCH="$2"
+            shift 2
+            ;;
         -d | --dry-run)
             DRY_RUN=true
             shift
@@ -132,6 +143,12 @@ build_prompt() {
     local prompt="$PROMPT"
     local extra="${EXTRA_CONTEXT[*]:-}"
 
+    if [[ -n "$TARGET_BRANCH" ]]; then
+        prompt+=$'\n\nTarget branch for this PR: '
+        prompt+="$TARGET_BRANCH"
+        prompt+=$'\nReview committed changes relative to this branch instead of the repository default, main, or master.\n'
+    fi
+
     if [[ -n "$extra" ]]; then
         prompt+=$'\n\nAdditional user-provided PR context:\n'
         prompt+="$extra"
@@ -143,13 +160,18 @@ build_prompt() {
 
 run_pi() {
     local prompt="$1"
+    local model_args=()
+
+    if [[ -n "$MODEL" ]]; then
+        model_args=(--model "$MODEL")
+    fi
 
     if [[ "$INTERACTIVE" == true ]]; then
-        pi "$prompt"
+        pi "${model_args[@]}" "$prompt"
         return
     fi
 
-    pi -p "$prompt"
+    pi "${model_args[@]}" -p "$prompt"
 }
 
 validate_pr_yaml() {
@@ -180,7 +202,11 @@ create_draft_pr() {
     body="$(yq -r '.body' "$pr_yaml")"
 
     git push
-    pr_url="$(gh pr create --draft --title "$title" --body "$body")"
+    if [[ -n "$TARGET_BRANCH" ]]; then
+        pr_url="$(gh pr create --draft --base "$TARGET_BRANCH" --title "$title" --body "$body")"
+    else
+        pr_url="$(gh pr create --draft --title "$title" --body "$body")"
+    fi
     xdg-open "$pr_url" >/dev/null 2>&1 &
     cleanup_pr_files "$root"
 

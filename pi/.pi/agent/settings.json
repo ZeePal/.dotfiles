@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.99.1",
+  "lastChangelogVersion": "1.4.0",
   "collapseChangelog": true,
   "defaultProvider": "openai-codex",
   "defaultModel": "gpt-6.1-sol",
@@ -8,6 +8,7 @@
     "npm:@ifi/oh-pi-themes",
     "npm:@latentminds/pi-quotas"
   ],
+  "tuiMode": "regular",
   "theme": "tokyo-night",
   "quietStartup": true,
   "enabledModels": [

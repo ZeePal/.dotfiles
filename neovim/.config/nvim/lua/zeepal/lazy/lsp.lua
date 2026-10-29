@@ -26,6 +26,18 @@ return {
 
 		require("fidget").setup({})
 		require("mason").setup()
+
+		local terraform_capabilities = vim.lsp.protocol.make_client_capabilities()
+		terraform_capabilities.textDocument.semanticTokens = nil
+
+		vim.lsp.config("terraformls", {
+			capabilities = terraform_capabilities,
+			on_init = function(client)
+				-- terraform-ls can return malformed delta-encoded tokens for complex HCL.
+				client.server_capabilities.semanticTokensProvider = nil
+			end,
+		})
+
 		require("mason-lspconfig").setup({
 			ensure_installed = {
 				"lua_ls",
